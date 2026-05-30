@@ -93,6 +93,21 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     let _ = tx.send(serde_json::to_string(&resp).unwrap());
                 }
             }
+            ClientPayload::SearchUser { username } => {
+                let exists = crate::db::user_exists(&state.pool, &username).await.unwrap_or(false);
+                let resp = ServerPayload::UserSearchResult { username, exists };
+                let _ = tx.send(serde_json::to_string(&resp).unwrap());
+            }
+
+
+
+            ClientPayload::SearchPrefix { prefix } => {
+                if prefix.len() < 2 { continue; }
+                let matches = crate::db::search_users_by_prefix(&state.pool, &prefix).await.unwrap_or_default();
+                let resp = ServerPayload::SearchResults { matches };
+                let _ = tx.send(serde_json::to_string(&resp).unwrap());
+            }
+
         }
     }
 

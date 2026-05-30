@@ -47,3 +47,23 @@ pub async fn get_password_hash(pool: &PgPool, username: &str) -> Result<Option<S
         .map_err(|e| AnonError::Db(format!("Get hash: {e}")))?;
     Ok(row.map(|r| r.0))
 }   
+
+pub async fn user_exists(pool: &PgPool, username: &str) -> Result<bool, AnonError> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT username FROM users WHERE username = $1"
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AnonError::Db(format!("Check user: {e}")))?;
+    Ok(row.is_some())
+}
+
+pub async fn search_users_by_prefix(pool: &PgPool, prefix: &str) -> Result<Vec<String>, AnonError> {
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT username FROM users WHERE username ILIKE $1 LIMIT 15")
+        .bind(format!("{}%", prefix))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AnonError::Db(format!("Search users: {e}")))?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
