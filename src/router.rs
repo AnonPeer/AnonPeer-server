@@ -53,6 +53,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 let out = match res {
                     Ok(session) => {
                         let _ = crate::db::save_user_keys(&state.pool, &username, &ed_public, &x25519_public).await;
+                        let _ = crate::db::save_session(&state.pool, &username, &session).await; // <--- ДОБАВИТЬ
                         current_user = Some(username.clone());
                         state.peers.insert(username, tx.clone());
                         ServerPayload::AuthOk { session_id: session }
@@ -65,6 +66,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 let res = crate::auth::login(&state.pool, &username, &password).await;
                 if let Ok(session) = res {
                     let _ = crate::db::save_user_keys(&state.pool, &username, &ed_public, &x25519_public).await;
+                    let _ = crate::db::save_session(&state.pool, &username, &session).await; // <--- ДОБАВИТЬ
                     current_user = Some(username.clone());
                     state.peers.insert(username.clone(), tx.clone());
                     tracing::info!("User {} connected", username);
@@ -99,7 +101,19 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 let _ = tx.send(serde_json::to_string(&resp).unwrap());
             }
 
-
+            ClientPayload::ValidateSession { session_id } => { // <--- ДОБАВИТЬ ВЕСЬ ЭТОТ БЛОК
+                match crate::db::get_username_by_session(&state.pool, &session_id).await {
+                    Ok(Some(username)) => {
+                        current_user = Some(username.clone());
+                        state.peers.insert(username.clone(), tx.clone());
+                        tracing::info!("User {} reconnected via session", username);
+                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthOk { session_id: session_id.clone() }).unwrap());
+                    }
+                    _ => {
+                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Недействительная сессия".into())).unwrap());
+                    }
+                }
+            }
 
             ClientPayload::SearchPrefix { prefix } => {
                 if prefix.len() < 2 { continue; }

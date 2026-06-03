@@ -17,6 +17,11 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, AnonError> {
         x25519_public BYTEA NOT NULL
     )").execute(&pool).await.map_err(|e| AnonError::Db(format!("Init keys: {e}")))?;
 
+    sqlx::query("CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL
+    )").execute(&pool).await.map_err(|e| AnonError::Db(format!("Init sessions: {e}")))?;
+
     Ok(pool)
 }
 
@@ -57,6 +62,20 @@ pub async fn user_exists(pool: &PgPool, username: &str) -> Result<bool, AnonErro
     .await
     .map_err(|e| AnonError::Db(format!("Check user: {e}")))?;
     Ok(row.is_some())
+}
+
+pub async fn save_session(pool: &PgPool, username: &str, session_id: &str) -> Result<(), AnonError> {
+    sqlx::query("INSERT INTO sessions (session_id, username) VALUES ($1, $2) ON CONFLICT (session_id) DO UPDATE SET username = EXCLUDED.username")
+        .bind(session_id).bind(username).execute(pool).await
+        .map_err(|e| AnonError::Db(format!("Save session: {e}")))?;
+    Ok(())
+}
+
+pub async fn get_username_by_session(pool: &PgPool, session_id: &str) -> Result<Option<String>, AnonError> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT username FROM sessions WHERE session_id = $1")
+        .bind(session_id).fetch_optional(pool).await
+        .map_err(|e| AnonError::Db(format!("Get session: {e}")))?;
+    Ok(row.map(|r| r.0))
 }
 
 pub async fn search_users_by_prefix(pool: &PgPool, prefix: &str) -> Result<Vec<String>, AnonError> {
