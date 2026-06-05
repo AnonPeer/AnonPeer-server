@@ -101,7 +101,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 let _ = tx.send(serde_json::to_string(&resp).unwrap());
             }
 
-            ClientPayload::ValidateSession { session_id } => { // <--- ДОБАВИТЬ ВЕСЬ ЭТОТ БЛОК
+            ClientPayload::ValidateSession { session_id } => { 
                 match crate::db::get_username_by_session(&state.pool, &session_id).await {
                     Ok(Some(username)) => {
                         current_user = Some(username.clone());
