@@ -3,7 +3,7 @@ use axum::extract::ws::{WebSocket, WebSocketUpgrade, Message};
 use axum::{Router, routing::get, extract::State};
 use sqlx::PgPool;
 use dashmap::DashMap;
-use shared::protocol::{ClientPayload, ServerPayload};
+use shared::protocol::{ClientPayload, ServerPayload, AppMessage};
 use futures_util::{StreamExt, SinkExt};
 
 type PeerMap = Arc<DashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>;
@@ -75,26 +75,137 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Login failed".into())).unwrap());
                 }
             }
-            ClientPayload::SendMessage { msg } => {
+
+
+
+
+
+
+
+            ClientPayload::Federate { from_server, msg } => {
+                // Проверяем, что сообщение действительно для нашего домена
+                let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+                if msg.to.ends_with(&format!("@{}", my_domain)) || msg.to.ends_with("@localhost") {
+                    let local_user = msg.to.split('@').next().unwrap_or(&msg.to).to_string();
+                    let json = serde_json::to_string(&ServerPayload::Forward { msg }).unwrap();
+                    if let Some(peer_tx) = state.peers.get(&local_user) {
+                        let _ = peer_tx.value().send(json);
+                        tracing::info!("Federated message delivered to {}", local_user);
+                    } else {
+                        tracing::warn!("Federated message for offline user: {}", local_user);
+                        // В будущем здесь можно добавить сохранение в оффлайн-очередь
+                    }
+                }
+            }
+
+
+
+
+
+
+
+
+
+
+            ClientPayload::SendMessage { mut msg } => {
                 if current_user.is_none() {
                     let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Unauthorized".into())).unwrap());
                     continue;
                 }
-                let json = serde_json::to_string(&ServerPayload::Forward { msg: msg.clone() }).unwrap();
-                if let Some(peer_tx) = state.peers.get(&msg.to) {
-                    let _ = peer_tx.value().send(json);
+                
+                // Гарантируем, что отправитель указан с доменом (для федерации)
+                let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+                if !msg.from.contains('@') {
+                    msg.from = format!("{}@{}", msg.from, my_domain);
+                }
+
+                if msg.to.contains('@') {
+                    let parts: Vec<&str> = msg.to.splitn(2, '@').collect();
+                    let target_domain = parts[1].to_string();
+                    
+                    if target_domain == my_domain {
+                        // Локальная доставка
+                        let local_user = parts[0].to_string();
+                        let json = serde_json::to_string(&ServerPayload::Forward { msg }).unwrap();
+                        if let Some(peer_tx) = state.peers.get(&local_user) {
+                            let _ = peer_tx.value().send(json);
+                        }
+                    } else {
+                        // Федерация: отправляем на другой сервер
+                        let state_clone = state.clone();
+                        let my_domain_clone = my_domain.clone();
+                        tokio::spawn(async move {
+                            forward_to_federation(&target_domain, &my_domain_clone, msg, state_clone).await;
+                        });
+                    }
+                } else {
+                    // Старое поведение для локальных пользователей без @
+                    let json = serde_json::to_string(&ServerPayload::Forward { msg: msg.clone() }).unwrap();
+                    if let Some(peer_tx) = state.peers.get(&msg.to) {
+                        let _ = peer_tx.value().send(json);
+                    }
                 }
             }
+
+
+
+
+
+
+
+
+
+
             ClientPayload::RequestKeys { target } => {
-                if current_user.is_none() {
-                    let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Unauthorized".into())).unwrap());
-                    continue;
-                }
-                if let Ok(Some((ed_pub, x_pub))) = crate::db::get_user_keys(&state.pool, &target).await {
-                    let resp = ServerPayload::PeerKeys { target, ed_public: ed_pub, x25519_public: x_pub };
-                    let _ = tx.send(serde_json::to_string(&resp).unwrap());
+                // УБРАЛИ ПРОВЕРКУ АВТОРИЗАЦИИ - публичные ключи доступны всем
+                
+                let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+                
+                // Извлекаем локальное имя пользователя (до символа @)
+                let local_user = if target.contains('@') {
+                    target.split('@').next().unwrap_or(&target).to_string()
+                } else {
+                    target.clone()
+                };
+                
+                // Проверяем, является ли запрос федеративным
+                if target.contains('@') {
+                    let parts: Vec<&str> = target.splitn(2, '@').collect();
+                    let target_domain = parts[1].to_string();
+
+                    // Если домен наш, ищем локального пользователя
+                    if target_domain == my_domain {
+                        if let Ok(Some((ed_pub, x_pub))) = crate::db::get_user_keys(&state.pool, &local_user).await {
+                            let resp = ServerPayload::PeerKeys { target, ed_public: ed_pub, x25519_public: x_pub };
+                            let _ = tx.send(serde_json::to_string(&resp).unwrap());
+                        }
+                    } else {
+                        // Если домен чужой, делегируем запрос туда
+                        let tx_clone = tx.clone();
+                        let target_clone = target.clone();
+                        tokio::spawn(async move {
+                            fetch_federated_keys(&target_domain, &target_clone, tx_clone).await;
+                        });
+                    }
+                } else {
+                    // Локальный запрос без домена
+                    if let Ok(Some((ed_pub, x_pub))) = crate::db::get_user_keys(&state.pool, &target).await {
+                        let resp = ServerPayload::PeerKeys { target, ed_public: ed_pub, x25519_public: x_pub };
+                        let _ = tx.send(serde_json::to_string(&resp).unwrap());
+                    }
                 }
             }
+
+
+
+
+
+
+
+
+
+
+
             ClientPayload::SearchUser { username } => {
                 let exists = crate::db::user_exists(&state.pool, &username).await.unwrap_or(false);
                 let resp = ServerPayload::UserSearchResult { username, exists };
@@ -117,8 +228,41 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
             ClientPayload::SearchPrefix { prefix } => {
                 if prefix.len() < 2 { continue; }
-                let matches = crate::db::search_users_by_prefix(&state.pool, &prefix).await.unwrap_or_default();
-                let resp = ServerPayload::SearchResults { matches };
+                
+                let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+                let federation_peers = std::env::var("FEDERATION_PEERS")
+                    .unwrap_or_else(|_| String::new());
+                
+                // Локальный поиск
+                let local_matches = crate::db::search_users_by_prefix(&state.pool, &prefix).await.unwrap_or_default();
+                
+                // Федеративный поиск
+                let mut all_matches = local_matches.clone();
+                let mut search_tasks = vec![];
+                
+                for peer in federation_peers.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    if peer == my_domain { continue; }
+                    
+                    let prefix_clone = prefix.clone();
+                    let peer_clone = peer.to_string();
+                    let tx_clone = tx.clone();
+                    
+                    let task = tokio::spawn(async move {
+                        search_federation_peer(&peer_clone, &prefix_clone, tx_clone).await;
+                    });
+                    search_tasks.push(task);
+                }
+                
+                // Ждем завершения всех федеративных запросов
+                for task in search_tasks {
+                    let _ = task.await;
+                }
+                
+                // Убираем дубликаты и сортируем
+                all_matches.sort();
+                all_matches.dedup();
+                
+                let resp = ServerPayload::SearchResults { matches: all_matches };
                 let _ = tx.send(serde_json::to_string(&resp).unwrap());
             }
 
@@ -130,4 +274,108 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         tracing::info!("User {} disconnected", user);
     }
     send_task.abort();
+
+
+
+async fn fetch_federated_keys(target_domain: &str, target_user: &str, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+    let ws_url = format!("ws://{}/ws", target_domain);
+    tracing::info!("Fetching federated keys for {} from {}", target_user, ws_url);
+    
+    match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok((ws_stream, _)) => {
+            let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+            let payload = shared::protocol::ClientPayload::RequestKeys { target: target_user.to_string() };
+            if let Ok(json) = serde_json::to_string(&payload) {
+                let _ = ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                
+                // Ждем ответ от чужого сервера
+                if let Some(Ok(msg)) = ws_receiver.next().await {
+                    if let Ok(text) = msg.to_text() {
+                        // Пересылаем ответ нашему оригинальному клиенту
+                        let _ = tx.send(text.to_string());
+                        tracing::info!("Federated keys received and forwarded");
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to connect to federation peer for keys {}: {}", target_domain, e);
+        }
+    }
+}
+
+
+    async fn forward_to_federation(target_domain: &str, my_domain: &str, msg: shared::protocol::AppMessage, _state: AppState) {
+        let ws_url = format!("ws://{}/ws", target_domain);
+        tracing::info!("Connecting to federation peer: {}", ws_url);
+        
+        match tokio_tungstenite::connect_async(&ws_url).await {
+            Ok((ws_stream, _)) => {
+                let (mut ws_sender, _) = ws_stream.split();
+                let payload = shared::protocol::ClientPayload::Federate {
+                    from_server: my_domain.to_string(),
+                    msg,
+                };
+                if let Ok(json) = serde_json::to_string(&payload) {
+                    let _ = ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
+                    tracing::info!("Federated message sent to {}", target_domain);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e);
+            }
+        }
+    }
+
+
+
+
+
+
+    async fn search_federation_peer(
+        target_domain: &str, 
+        prefix: &str, 
+        tx: tokio::sync::mpsc::UnboundedSender<String>
+    ) {
+        let ws_url = format!("ws://{}/ws", target_domain);
+        tracing::info!("Searching federation peer {} for prefix: {}", ws_url, prefix);
+        
+        match tokio_tungstenite::connect_async(&ws_url).await {
+            Ok((ws_stream, _)) => {
+                let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+                let payload = shared::protocol::ClientPayload::SearchPrefix { prefix: prefix.to_string() };
+                
+                if let Ok(json) = serde_json::to_string(&payload) {
+                    if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await.is_err() {
+                        return;
+                    }
+                    
+                    // Ждем ответ
+                    if let Some(Ok(msg)) = ws_receiver.next().await {
+                        if let Ok(text) = msg.to_text() {
+                            if let Ok(ServerPayload::SearchResults { matches }) = serde_json::from_str::<ServerPayload>(text) {
+                                tracing::info!("Received {} matches from {}", matches.len(), target_domain);
+                                // Пересылаем результаты нашему клиенту
+                                let _ = tx.send(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e);
+            }
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
 }

@@ -17,3 +17,4 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 dashmap = "6.0"
 dotenvy = "0.15"
 serde = { version = "1.0", features = ["derive"] }
+tokio-tungstenite = "0.21"
