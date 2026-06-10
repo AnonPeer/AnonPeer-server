@@ -81,7 +81,7 @@ GRANT ALL PRIVILEGES ON DATABASE anonpeer TO anonuser;
 nano /path/to/server/.env
 
 # Подключение к PostgreSQL
-DATABASE_URL=postgres://anonuser:your_secure_password@localhost:5432/anonpeer
+DATABASE_URL=postgres://anonuser:YOUR_PASSWORD@localhost:5432/anonpeer
 
 # Домен/адрес текущего сервера (используется для федерации)
 SERVER_DOMAIN=127.0.0.1:3000
