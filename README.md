@@ -42,7 +42,7 @@ curl -O https://github.com/AnonPeer/AnonPeer-server.git/src/panel.py
 python3 panel.py
 ```
 
-### Ручная установка и настрйока
+### Ручная установка и настройка
 установка необходимых инстурментов
 ```bash
 # Ubuntu/Debian
