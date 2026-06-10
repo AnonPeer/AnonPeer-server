@@ -38,7 +38,7 @@ AnonPeer-server — это высокопроизводительный серв
 
 ### Автоматическая установка
 ```bash
-curl -O https://github.com/AnonPeer/AnonPeer-server.git/pamel.py
+curl -O https://github.com/AnonPeer/AnonPeer-server.git/src/panel.py
 python3 panel.py
 ```
 
