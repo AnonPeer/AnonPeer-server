@@ -1,13 +1,15 @@
 use sqlx::PgPool;
 use shared::errors::AnonError;
+use shared::protocol::UserInfo;
 
 pub async fn init_pool(database_url: &str) -> Result<PgPool, AnonError> {
     let pool = PgPool::connect(database_url).await
         .map_err(|e| AnonError::Db(format!("Postgres connect: {e}")))?;
-        
+    
     sqlx::query("CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(64) UNIQUE NOT NULL,
+        nickname TEXT NOT NULL,
         password_hash TEXT NOT NULL
     )").execute(&pool).await.map_err(|e| AnonError::Db(format!("Init users: {e}")))?;
 
@@ -25,9 +27,9 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, AnonError> {
     Ok(pool)
 }
 
-pub async fn create_user(pool: &PgPool, username: &str, hash: &str) -> Result<(), AnonError> {
-    sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
-        .bind(username).bind(hash).execute(pool).await
+pub async fn create_user(pool: &PgPool, username: &str, nickname: &str, hash: &str) -> Result<(), AnonError> {
+    sqlx::query("INSERT INTO users (username, nickname, password_hash) VALUES ($1, $2, $3)")
+        .bind(username).bind(nickname).bind(hash).execute(pool).await
         .map_err(|e| AnonError::Db(format!("Create user: {e}")))?;
     Ok(())
 }
@@ -51,16 +53,12 @@ pub async fn get_password_hash(pool: &PgPool, username: &str) -> Result<Option<S
         .bind(username).fetch_optional(pool).await
         .map_err(|e| AnonError::Db(format!("Get hash: {e}")))?;
     Ok(row.map(|r| r.0))
-}   
+}
 
 pub async fn user_exists(pool: &PgPool, username: &str) -> Result<bool, AnonError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT username FROM users WHERE username = $1"
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| AnonError::Db(format!("Check user: {e}")))?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT username FROM users WHERE username = $1")
+        .bind(username).fetch_optional(pool).await
+        .map_err(|e| AnonError::Db(format!("Check user: {e}")))?;
     Ok(row.is_some())
 }
 
@@ -78,11 +76,27 @@ pub async fn get_username_by_session(pool: &PgPool, session_id: &str) -> Result<
     Ok(row.map(|r| r.0))
 }
 
-pub async fn search_users_by_prefix(pool: &PgPool, prefix: &str) -> Result<Vec<String>, AnonError> {
-    let rows: Vec<(String,)> = sqlx::query_as("SELECT username FROM users WHERE username ILIKE $1 LIMIT 15")
-        .bind(format!("{}%", prefix))
-        .fetch_all(pool)
-        .await
-        .map_err(|e| AnonError::Db(format!("Search users: {e}")))?;
-    Ok(rows.into_iter().map(|r| r.0).collect())
+pub async fn search_users_by_prefix(pool: &PgPool, prefix: &str) -> Result<Vec<UserInfo>, AnonError> {
+    let search_pattern = format!("%{}%", prefix);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT nickname, username FROM users WHERE username ILIKE $1 OR nickname ILIKE $1 LIMIT 15"
+    )
+    .bind(&search_pattern)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AnonError::Db(format!("Search users: {e}")))?;
+    
+    Ok(rows.into_iter().map(|(nickname, username)| UserInfo { nickname, username }).collect())
+}
+
+pub async fn get_user_profile(pool: &PgPool, username: &str) -> Result<Option<UserInfo>, AnonError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT nickname, username FROM users WHERE username = $1"
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AnonError::Db(format!("Get profile: {e}")))?;
+    
+    Ok(row.map(|(nickname, username)| UserInfo { nickname, username }))
 }

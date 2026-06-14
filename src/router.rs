@@ -3,7 +3,7 @@ use axum::extract::ws::{WebSocket, WebSocketUpgrade, Message};
 use axum::{Router, routing::get, extract::State};
 use sqlx::PgPool;
 use dashmap::DashMap;
-use shared::protocol::{ClientPayload, ServerPayload, AppMessage};
+use shared::protocol::{ClientPayload, ServerPayload, AppMessage, UserInfo};
 use futures_util::{StreamExt, SinkExt};
 
 type PeerMap = Arc<DashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>;
@@ -40,7 +40,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     while let Some(Ok(msg)) = ws_receiver.next().await {
         let text = match msg.to_text() {
             Ok(t) => t,
-            Err(_) => continue, 
+            Err(_) => continue,
         };
         if text.is_empty() { continue; }
         
@@ -48,12 +48,13 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         let Ok(payload) = payload else { continue; };
 
         match payload {
-            ClientPayload::Register { username, password, ed_public, x25519_public } => {
-                let res = crate::auth::register(&state.pool, &username, &password).await;
+
+            ClientPayload::Register { nickname, username, password, ed_public, x25519_public } => {
+                let res = crate::auth::register(&state.pool, &nickname, &username, &password).await;
                 let out = match res {
                     Ok(session) => {
                         let _ = crate::db::save_user_keys(&state.pool, &username, &ed_public, &x25519_public).await;
-                        let _ = crate::db::save_session(&state.pool, &username, &session).await; // <--- ДОБАВИТЬ
+                        let _ = crate::db::save_session(&state.pool, &username, &session).await;
                         current_user = Some(username.clone());
                         state.peers.insert(username, tx.clone());
                         ServerPayload::AuthOk { session_id: session }
@@ -66,7 +67,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 let res = crate::auth::login(&state.pool, &username, &password).await;
                 if let Ok(session) = res {
                     let _ = crate::db::save_user_keys(&state.pool, &username, &ed_public, &x25519_public).await;
-                    let _ = crate::db::save_session(&state.pool, &username, &session).await; // <--- ДОБАВИТЬ
+                    let _ = crate::db::save_session(&state.pool, &username, &session).await;
                     current_user = Some(username.clone());
                     state.peers.insert(username.clone(), tx.clone());
                     tracing::info!("User {} connected", username);
@@ -75,23 +76,16 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Login failed".into())).unwrap());
                 }
             }
-
-            ClientPayload::Federate { from_server, msg } => {
+            ClientPayload::Federate { from_server: _, msg } => {
                 let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
                 if msg.to.ends_with(&format!("@{}", my_domain)) || msg.to.ends_with("@localhost") {
                     let local_user = msg.to.split('@').next().unwrap_or(&msg.to).to_string();
                     let json = serde_json::to_string(&ServerPayload::Forward { msg }).unwrap();
                     if let Some(peer_tx) = state.peers.get(&local_user) {
                         let _ = peer_tx.value().send(json);
-                        tracing::info!("Federated message delivered to {}", local_user);
-                    } else {
-                        tracing::warn!("Federated message for offline user: {}", local_user);
                     }
                 }
             }
-
-
-
             ClientPayload::SendMessage { mut msg } => {
                 if current_user.is_none() {
                     let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Unauthorized".into())).unwrap());
@@ -127,12 +121,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     }
                 }
             }
-
-
             ClientPayload::RequestKeys { target } => {
-                
                 let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-                
                 let local_user = if target.contains('@') {
                     target.split('@').next().unwrap_or(&target).to_string()
                 } else {
@@ -163,32 +153,11 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 }
             }
 
-            ClientPayload::SearchUser { username } => {
-                let exists = crate::db::user_exists(&state.pool, &username).await.unwrap_or(false);
-                let resp = ServerPayload::UserSearchResult { username, exists };
-                let _ = tx.send(serde_json::to_string(&resp).unwrap());
-            }
-
-            ClientPayload::ValidateSession { session_id } => { 
-                match crate::db::get_username_by_session(&state.pool, &session_id).await {
-                    Ok(Some(username)) => {
-                        current_user = Some(username.clone());
-                        state.peers.insert(username.clone(), tx.clone());
-                        tracing::info!("User {} reconnected via session", username);
-                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthOk { session_id: session_id.clone() }).unwrap());
-                    }
-                    _ => {
-                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Недействительная сессия".into())).unwrap());
-                    }
-                }
-            }
-
             ClientPayload::SearchPrefix { prefix } => {
                 if prefix.len() < 2 { continue; }
                 
                 let my_domain = std::env::var("SERVER_DOMAIN").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-                let federation_peers = std::env::var("FEDERATION_PEERS")
-                    .unwrap_or_else(|_| String::new());
+                let federation_peers = std::env::var("FEDERATION_PEERS").unwrap_or_else(|_| String::new());
                 
                 let local_matches = crate::db::search_users_by_prefix(&state.pool, &prefix).await.unwrap_or_default();
                 
@@ -212,13 +181,31 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     let _ = task.await;
                 }
                 
-                all_matches.sort();
-                all_matches.dedup();
+                all_matches.sort_by(|a, b| a.username.cmp(&b.username));
+                all_matches.dedup_by(|a, b| a.username == b.username);
                 
                 let resp = ServerPayload::SearchResults { matches: all_matches };
                 let _ = tx.send(serde_json::to_string(&resp).unwrap());
             }
 
+            ClientPayload::RequestProfile { username } => {
+                let profile = crate::db::get_user_profile(&state.pool, &username).await.unwrap_or(None);
+                let resp = ServerPayload::ProfileResult { user: profile };
+                let _ = tx.send(serde_json::to_string(&resp).unwrap());
+            }
+            ClientPayload::ValidateSession { session_id } => { 
+                match crate::db::get_username_by_session(&state.pool, &session_id).await {
+                    Ok(Some(username)) => {
+                        current_user = Some(username.clone());
+                        state.peers.insert(username.clone(), tx.clone());
+                        tracing::info!("User {} reconnected via session", username);
+                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthOk { session_id: session_id.clone() }).unwrap());
+                    }
+                    _ => {
+                        let _ = tx.send(serde_json::to_string(&ServerPayload::AuthErr("Недействительная сессия".into())).unwrap());
+                    }
+                }
+            }
         }
     }
 
@@ -227,91 +214,61 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         tracing::info!("User {} disconnected", user);
     }
     send_task.abort();
-
-
+}
 
 async fn fetch_federated_keys(target_domain: &str, target_user: &str, tx: tokio::sync::mpsc::UnboundedSender<String>) {
     let ws_url = format!("ws://{}/ws", target_domain);
-    tracing::info!("Fetching federated keys for {} from {}", target_user, ws_url);
-    
     match tokio_tungstenite::connect_async(&ws_url).await {
         Ok((ws_stream, _)) => {
             let (mut ws_sender, mut ws_receiver) = ws_stream.split();
             let payload = shared::protocol::ClientPayload::RequestKeys { target: target_user.to_string() };
             if let Ok(json) = serde_json::to_string(&payload) {
                 let _ = ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
-                
                 if let Some(Ok(msg)) = ws_receiver.next().await {
                     if let Ok(text) = msg.to_text() {
                         let _ = tx.send(text.to_string());
-                        tracing::info!("Federated keys received and forwarded");
                     }
                 }
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to connect to federation peer for keys {}: {}", target_domain, e);
-        }
+        Err(e) => tracing::error!("Failed to connect to federation peer for keys {}: {}", target_domain, e),
     }
 }
 
-
-    async fn forward_to_federation(target_domain: &str, my_domain: &str, msg: shared::protocol::AppMessage, _state: AppState) {
-        let ws_url = format!("ws://{}/ws", target_domain);
-        tracing::info!("Connecting to federation peer: {}", ws_url);
-        
-        match tokio_tungstenite::connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
-                let (mut ws_sender, _) = ws_stream.split();
-                let payload = shared::protocol::ClientPayload::Federate {
-                    from_server: my_domain.to_string(),
-                    msg,
-                };
-                if let Ok(json) = serde_json::to_string(&payload) {
-                    let _ = ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
-                    tracing::info!("Federated message sent to {}", target_domain);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e);
+async fn forward_to_federation(target_domain: &str, my_domain: &str, msg: shared::protocol::AppMessage, _state: AppState) {
+    let ws_url = format!("ws://{}/ws", target_domain);
+    match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok((ws_stream, _)) => {
+            let (mut ws_sender, _) = ws_stream.split();
+            let payload = shared::protocol::ClientPayload::Federate {
+                from_server: my_domain.to_string(),
+                msg,
+            };
+            if let Ok(json) = serde_json::to_string(&payload) {
+                let _ = ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await;
             }
         }
+        Err(e) => tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e),
     }
+}
 
-
-
-    async fn search_federation_peer(
-        target_domain: &str, 
-        prefix: &str, 
-        tx: tokio::sync::mpsc::UnboundedSender<String>
-    ) {
-        let ws_url = format!("ws://{}/ws", target_domain);
-        tracing::info!("Searching federation peer {} for prefix: {}", ws_url, prefix);
-        
-        match tokio_tungstenite::connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
-                let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-                let payload = shared::protocol::ClientPayload::SearchPrefix { prefix: prefix.to_string() };
-                
-                if let Ok(json) = serde_json::to_string(&payload) {
-                    if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await.is_err() {
-                        return;
-                    }
-                    
-                    if let Some(Ok(msg)) = ws_receiver.next().await {
-                        if let Ok(text) = msg.to_text() {
-                            if let Ok(ServerPayload::SearchResults { matches }) = serde_json::from_str::<ServerPayload>(text) {
-                                tracing::info!("Received {} matches from {}", matches.len(), target_domain);
-                                let _ = tx.send(text.to_string());
-                            }
+async fn search_federation_peer(target_domain: &str, prefix: &str, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+    let ws_url = format!("ws://{}/ws", target_domain);
+    match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok((ws_stream, _)) => {
+            let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+            let payload = shared::protocol::ClientPayload::SearchPrefix { prefix: prefix.to_string() };
+            if let Ok(json) = serde_json::to_string(&payload) {
+                if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await.is_err() { return; }
+                if let Some(Ok(msg)) = ws_receiver.next().await {
+                    if let Ok(text) = msg.to_text() {
+                        if let Ok(ServerPayload::SearchResults { matches: _ }) = serde_json::from_str::<ServerPayload>(text) {
+                            let _ = tx.send(text.to_string());
                         }
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e);
-            }
         }
+        Err(e) => tracing::error!("Failed to connect to federation peer {}: {}", target_domain, e),
     }
-
 }

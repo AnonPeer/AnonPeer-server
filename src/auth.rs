@@ -3,9 +3,10 @@ use shared::crypto;
 use shared::errors::AnonError;
 use uuid::Uuid;
 
-pub async fn register(pool: &PgPool, username: &str, password: &str) -> Result<String, AnonError> {
+// Добавили параметр nickname
+pub async fn register(pool: &PgPool, nickname: &str, username: &str, password: &str) -> Result<String, AnonError> {
     let hash = crypto::hash_password(password)?;
-    crate::db::create_user(pool, username, &hash).await?;
+    crate::db::create_user(pool, username, nickname, &hash).await?;
     Ok(Uuid::new_v4().to_string())
 }
 
