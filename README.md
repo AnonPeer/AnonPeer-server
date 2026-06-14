@@ -18,14 +18,25 @@ AnonPeer-server — это высокопроизводительный серв
 ## Структура проекта
 ```
 ├── Cargo.toml
-├── .env.example
-├── LICENSE
 ├── README.md
 └── src
-    ├── main.rs     
-    ├── db.rs      
-    ├── auth.rs    
-    └── router.rs  
+    ├── db
+    │   ├── mod.rs
+    │   └── queries.rs
+    ├── main.rs
+    ├── panel.py
+    ├── services
+    │   ├── auth.rs
+    │   ├── federation.rs
+    │   ├── message.rs
+    │   ├── mod.rs
+    │   └── profile.rs
+    ├── state.rs
+    └── ws
+        ├── connection.rs
+        ├── dispatcher.rs
+        ├── handlers.rs
+        └── mod.rs
 ```
 ## 🚀 Установка
 
