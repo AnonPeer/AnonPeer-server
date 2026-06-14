@@ -25,3 +25,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     Ok(())
 }
+
+/*
+             . --- .
+           /        \
+          |  O  _  O |
+          |  ./   \. |
+          /  `-._.-'  \
+        .' /         \ `.
+    .-~.-~/           \~-.~-.
+.-~ ~    |             |    ~ ~-.
+`- .     |             |     . -'
+     ~ - |             | - ~
+         \             /
+       ___\           /___
+       ~;_  &gt;- . . -&lt;  _i~
+          `'         `'
+The server code is guarded by this penguin, please don't break it.
+/*
+
